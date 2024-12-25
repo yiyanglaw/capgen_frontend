@@ -1,0 +1,181 @@
+import serial
+import time
+from datetime import datetime
+import requests
+import json
+import board
+import busio
+import adafruit_dht
+import adafruit_ssd1306
+from PIL import Image, ImageDraw, ImageFont
+import RPi.GPIO as GPIO
+
+# Pin Definitions
+BUZZER_PIN = 18
+IR_SENSOR = 23
+ECHO_PIN = 24
+TRIG_PIN = 25
+SOUND_PIN = 17
+SMOKE_PIN = 27
+LDR_PIN = 22
+DHT_PIN = 4
+
+# Constants
+SCREEN_WIDTH = 128
+SCREEN_HEIGHT = 32
+SOUND_THRESHOLD = 500
+DISTANCE_THRESHOLD = 100
+
+# ThingSpeak configuration
+WRITE_API_KEY = 'OEH1GUAT6UXH5P6N'
+CHANNEL_ID = '2794357'
+BASE_URL = f'https://api.thingspeak.com/channels/{CHANNEL_ID}/bulk_update.json'
+
+# Bluetooth configuration
+BLUETOOTH_PORT = '/dev/rfcomm0'
+BAUD_RATE = 9600
+
+class SmartSystem:
+    def __init__(self):
+        # Initialize GPIO
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(BUZZER_PIN, GPIO.OUT)
+        GPIO.setup(IR_SENSOR, GPIO.IN)
+        GPIO.setup(TRIG_PIN, GPIO.OUT)
+        GPIO.setup(ECHO_PIN, GPIO.IN)
+        GPIO.setup(SOUND_PIN, GPIO.IN)
+        GPIO.setup(SMOKE_PIN, GPIO.IN)
+        GPIO.setup(LDR_PIN, GPIO.IN)
+        
+        # Initialize I2C OLED
+        i2c = busio.I2C(board.SCL, board.SDA)
+        self.oled = adafruit_ssd1306.SSD1306_I2C(SCREEN_WIDTH, SCREEN_HEIGHT, i2c)
+        
+        # Initialize DHT sensor
+        self.dht = adafruit_dht.DHT11(DHT_PIN)
+        
+        # Initialize Bluetooth
+        self.bluetooth = serial.Serial(BLUETOOTH_PORT, BAUD_RATE, timeout=1)
+        
+        # Initialize variables
+        self.people_count = 0
+        self.sound_level = "Low"
+        self.last_buzzer_time = 0
+        
+    def check_entrance(self):
+        if GPIO.input(IR_SENSOR):
+            self.people_count += 1
+            self.bluetooth.write(b"DOOR:1\n")
+            
+    def check_exit(self):
+        GPIO.output(TRIG_PIN, GPIO.LOW)
+        time.sleep(0.000002)
+        GPIO.output(TRIG_PIN, GPIO.HIGH)
+        time.sleep(0.00001)
+        GPIO.output(TRIG_PIN, GPIO.LOW)
+        
+        while not GPIO.input(ECHO_PIN):
+            pass
+        start_time = time.time()
+        
+        while GPIO.input(ECHO_PIN):
+            pass
+        duration = time.time() - start_time
+        
+        distance = duration * 34300 / 2
+        if distance < DISTANCE_THRESHOLD and self.people_count > 0:
+            self.people_count -= 1
+            self.bluetooth.write(b"DOOR:1\n")
+            
+    def check_sound(self):
+        sound_value = GPIO.input(SOUND_PIN)
+        current_time = time.time()
+        
+        if sound_value > SOUND_THRESHOLD:
+            if current_time - self.last_buzzer_time > 2:
+                GPIO.output(BUZZER_PIN, GPIO.HIGH)
+                time.sleep(2)
+                GPIO.output(BUZZER_PIN, GPIO.LOW)
+                self.last_buzzer_time = current_time
+                self.sound_level = "High"
+        elif sound_value > SOUND_THRESHOLD/2:
+            self.sound_level = "Medium"
+        else:
+            self.sound_level = "Low"
+            
+    def update_display(self):
+        try:
+            temperature = self.dht.temperature
+            humidity = self.dht.humidity
+            self.bluetooth.write(f"TEMP:{temperature}\n".encode())
+            
+            # Clear display
+            self.oled.fill(0)
+            self.oled.show()
+            
+            # Create blank image for drawing
+            image = Image.new("1", (SCREEN_WIDTH, SCREEN_HEIGHT))
+            draw = ImageDraw.Draw(image)
+            
+            # Draw text
+            draw.text((0, 0), f"People: {self.people_count}", fill=255)
+            draw.text((0, 10), f"Temp: {temperature}°C", fill=255)
+            draw.text((0, 20), f"Humidity: {humidity}%", fill=255)
+            
+            # Display image
+            self.oled.image(image)
+            self.oled.show()
+            
+        except RuntimeError as e:
+            print(f"DHT Reading error: {e}")
+            
+    def upload_to_thingspeak(self):
+        try:
+            temperature = self.dht.temperature
+            humidity = self.dht.humidity
+            light = GPIO.input(LDR_PIN)
+            smoke = GPIO.input(SMOKE_PIN)
+            
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            payload = {
+                'write_api_key': WRITE_API_KEY,
+                'updates': [{
+                    'created_at': timestamp,
+                    'field1': self.people_count,
+                    'field2': temperature,
+                    'field3': humidity,
+                    'field4': light,
+                    'field5': smoke,
+                    'field6': 1 if self.sound_level == "High" else (0.5 if self.sound_level == "Medium" else 0),
+                    'field7': 0  # Door status
+                }]
+            }
+            
+            response = requests.post(BASE_URL, json=payload)
+            if response.status_code == 202:
+                print(f"Data uploaded successfully at {timestamp}")
+            else:
+                print(f"Error uploading data: {response.status_code}")
+                
+        except Exception as e:
+            print(f"Error in upload: {e}")
+            
+    def run(self):
+        try:
+            while True:
+                self.check_entrance()
+                self.check_exit()
+                self.check_sound()
+                self.update_display()
+                self.upload_to_thingspeak()
+                time.sleep(15)  # ThingSpeak free tier limit
+                
+        except KeyboardInterrupt:
+            print("Cleaning up...")
+            GPIO.cleanup()
+            self.bluetooth.close()
+            
+if __name__ == "__main__":
+    system = SmartSystem()
+    system.run()
