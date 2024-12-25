@@ -5,7 +5,7 @@ import requests
 import json
 import RPi.GPIO as GPIO
 import smbus
-import adafruit_dht
+import Adafruit_DHT
 from PIL import Image, ImageDraw, ImageFont
 
 # Pin Definitions
@@ -51,7 +51,7 @@ class SmartSystem:
         self.oled_init()
         
         # Initialize DHT sensor
-        self.dht = adafruit_dht.DHT11(DHT_PIN)
+        self.dht = Adafruit_DHT.DHT11(DHT_PIN)
         
         # Initialize Bluetooth
         self.bluetooth = serial.Serial(BLUETOOTH_PORT, BAUD_RATE, timeout=1)
@@ -153,7 +153,7 @@ class SmartSystem:
             
             # Draw text
             draw.text((0, 0), f"People: {self.people_count}", fill=255)
-            draw.text((0, 10), f"Temp: {temperature}°C", fill=255)
+            draw.text((0, 10), f"Temp: {temperature}Â°C", fill=255)
             draw.text((0, 20), f"Humidity: {humidity}%", fill=255)
             
             # Display image data
