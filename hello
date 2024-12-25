@@ -51,7 +51,8 @@ class SmartSystem:
         self.oled_init()
         
         # Initialize DHT sensor
-        self.dht = Adafruit_DHT.DHT11(DHT_PIN)
+        self.dht_sensor = Adafruit_DHT.DHT11
+        self.dht_pin = DHT_PIN
         
         # Initialize Bluetooth
         self.bluetooth = serial.Serial(BLUETOOTH_PORT, BAUD_RATE, timeout=1)
@@ -134,70 +135,72 @@ class SmartSystem:
             
     def update_display(self):
         try:
-            temperature = self.dht.temperature
-            humidity = self.dht.humidity
-            self.bluetooth.write(f"TEMP:{temperature}\n".encode())
-            
-            # Clear display
-            self.send_oled_command(0x00)  # Clear display memory
-            self.send_oled_command(0x21)  # Set column address
-            self.send_oled_command(0x00)  # Start at column 0
-            self.send_oled_command(SCREEN_WIDTH - 1)  # End at column 127
-            self.send_oled_command(0x22)  # Set page address
-            self.send_oled_command(0x00)  # Start at page 0
-            self.send_oled_command(0x07)  # End at page 7
-            
-            # Create blank image for drawing
-            image = Image.new("1", (SCREEN_WIDTH, SCREEN_HEIGHT))
-            draw = ImageDraw.Draw(image)
-            
-            # Draw text
-            draw.text((0, 0), f"People: {self.people_count}", fill=255)
-            draw.text((0, 10), f"Temp: {temperature}Â°C", fill=255)
-            draw.text((0, 20), f"Humidity: {humidity}%", fill=255)
-            
-            # Display image data
-            for y in range(0, SCREEN_HEIGHT, 8):
-                line = 0
-                for x in range(SCREEN_WIDTH):
-                    pixel = image.getpixel((x, y))
-                    if pixel == 0:
-                        line |= 0x00
-                    else:
-                        line |= (1 << (x % 8))
-                self.send_oled_data(line)
-            
+            humidity, temperature = Adafruit_DHT.read_retry(self.dht_sensor, self.dht_pin)
+            if humidity is not None and temperature is not None:
+                self.bluetooth.write(f"TEMP:{temperature}\n".encode())
+                
+                # Clear display
+                self.send_oled_command(0x00)  # Clear display memory
+                self.send_oled_command(0x21)  # Set column address
+                self.send_oled_command(0x00)  # Start at column 0
+                self.send_oled_command(SCREEN_WIDTH - 1)  # End at column 127
+                self.send_oled_command(0x22)  # Set page address
+                self.send_oled_command(0x00)  # Start at page 0
+                self.send_oled_command(0x07)  # End at page 7
+                
+                # Create blank image for drawing
+                image = Image.new("1", (SCREEN_WIDTH, SCREEN_HEIGHT))
+                draw = ImageDraw.Draw(image)
+                
+                # Draw text
+                draw.text((0, 0), f"People: {self.people_count}", fill=255)
+                draw.text((0, 10), f"Temp: {temperature}°C", fill=255)
+                draw.text((0, 20), f"Humidity: {humidity}%", fill=255)
+                
+                # Display image data
+                for y in range(0, SCREEN_HEIGHT, 8):
+                    line = 0
+                    for x in range(SCREEN_WIDTH):
+                        pixel = image.getpixel((x, y))
+                        if pixel == 0:
+                            line |= 0x00
+                        else:
+                            line |= (1 << (x % 8))
+                    self.send_oled_data(line)
+            else:
+                print("Failed to get reading from DHT sensor")
+                
         except RuntimeError as e:
             print(f"DHT Reading error: {e}")
             
     def upload_to_thingspeak(self):
         try:
-            temperature = self.dht.temperature
-            humidity = self.dht.humidity
-            light = GPIO.input(LDR_PIN)
-            smoke = GPIO.input(SMOKE_PIN)
-            
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            payload = {
-                'write_api_key': WRITE_API_KEY,
-                'updates': [{
-                    'created_at': timestamp,
-                    'field1': self.people_count,
-                    'field2': temperature,
-                    'field3': humidity,
-                    'field4': light,
-                    'field5': smoke,
-                    'field6': 1 if self.sound_level == "High" else (0.5 if self.sound_level == "Medium" else 0),
-                    'field7': 0  # Door status
-                }]
-            }
-            
-            response = requests.post(BASE_URL, json=payload)
-            if response.status_code == 202:
-                print(f"Data uploaded successfully at {timestamp}")
-            else:
-                print(f"Error uploading data: {response.status_code}")
+            humidity, temperature = Adafruit_DHT.read_retry(self.dht_sensor, self.dht_pin)
+            if humidity is not None and temperature is not None:
+                light = GPIO.input(LDR_PIN)
+                smoke = GPIO.input(SMOKE_PIN)
+                
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                payload = {
+                    'write_api_key': WRITE_API_KEY,
+                    'updates': [{
+                        'created_at': timestamp,
+                        'field1': self.people_count,
+                        'field2': temperature,
+                        'field3': humidity,
+                        'field4': light,
+                        'field5': smoke,
+                        'field6': 1 if self.sound_level == "High" else (0.5 if self.sound_level == "Medium" else 0),
+                        'field7': 0  # Door status
+                    }]
+                }
+                
+                response = requests.post(BASE_URL, json=payload)
+                if response.status_code == 202:
+                    print(f"Data uploaded successfully at {timestamp}")
+                else:
+                    print(f"Error uploading data: {response.status_code}")
                 
         except Exception as e:
             print(f"Error in upload: {e}")
