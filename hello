@@ -1,225 +1,150 @@
 import serial
 import time
 from datetime import datetime
-import requests
-import json
 import RPi.GPIO as GPIO
-import smbus
 import Adafruit_DHT
-from PIL import Image, ImageDraw, ImageFont
 
-# Pin Definitions
+# Pin definitions
 BUZZER_PIN = 18
+SOUND_PIN = 17
+DHT_PIN = 4
 IR_SENSOR = 23
 ECHO_PIN = 24
 TRIG_PIN = 25
-SOUND_PIN = 17
-SMOKE_PIN = 27
-LDR_PIN = 22
-DHT_PIN = 4
+LDR_PIN = 27
+SMOKE_PIN = 22
 
 # Constants
-SCREEN_WIDTH = 128
-SCREEN_HEIGHT = 32
 SOUND_THRESHOLD = 500
 DISTANCE_THRESHOLD = 100
-
-# ThingSpeak configuration
-WRITE_API_KEY = 'OEH1GUAT6UXH5P6N'
-CHANNEL_ID = '2794357'
-BASE_URL = f'https://api.thingspeak.com/channels/{CHANNEL_ID}/bulk_update.json'
-
-# Bluetooth configuration
-BLUETOOTH_PORT = '/dev/rfcomm0'
+SERIAL_PORT = '/dev/ttyACM0'  # USB connection to Arduino
 BAUD_RATE = 9600
 
 class SmartSystem:
     def __init__(self):
-        # Initialize GPIO
+        # Setup GPIO
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(BUZZER_PIN, GPIO.OUT)
+        GPIO.setup(SOUND_PIN, GPIO.IN)
         GPIO.setup(IR_SENSOR, GPIO.IN)
         GPIO.setup(TRIG_PIN, GPIO.OUT)
         GPIO.setup(ECHO_PIN, GPIO.IN)
-        GPIO.setup(SOUND_PIN, GPIO.IN)
-        GPIO.setup(SMOKE_PIN, GPIO.IN)
         GPIO.setup(LDR_PIN, GPIO.IN)
+        GPIO.setup(SMOKE_PIN, GPIO.IN)
         
-        # Initialize I2C with smbus
-        self.i2c_bus = smbus.SMBus(1)  # Use I2C bus 1 for Raspberry Pi
-        self.oled_address = 0x3C  # I2C address of the OLED display
-        self.oled_init()
-        
-        # Initialize DHT sensor
-        self.dht_sensor = Adafruit_DHT.DHT11
-        self.dht_pin = DHT_PIN
-        
-        # Initialize Bluetooth
-        self.bluetooth = serial.Serial(BLUETOOTH_PORT, BAUD_RATE, timeout=1)
-        
-        # Initialize variables
-        self.people_count = 0
-        self.sound_level = "Low"
+        # Initialize serial connection to Arduino
+        try:
+            self.arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+            time.sleep(2)  # Wait for connection to establish
+        except serial.SerialException as e:
+            print(f"Error opening serial connection: {e}")
+            exit(1)
+            
         self.last_buzzer_time = 0
+        self.dht_sensor = Adafruit_DHT.DHT11
+        self.people_count = 0
+        self.door_state = False
         
-    def oled_init(self):
-        """Initialize the OLED display."""
-        self.send_oled_command(0xAE)  # Display off
-        self.send_oled_command(0xA4)  # Display all on
-        self.send_oled_command(0xD3)  # Set display offset
-        self.send_oled_command(0x00)  # No offset
-        self.send_oled_command(0x40)  # Set start line
-        self.send_oled_command(0x8D)  # Charge pump
-        self.send_oled_command(0x14)  # Enable charge pump
-        self.send_oled_command(0xA1)  # Set segment re-map
-        self.send_oled_command(0xC8)  # Set COM scan direction
-        self.send_oled_command(0xDA)  # Set COM pins
-        self.send_oled_command(0x12)  # Sequential COM pins
-        self.send_oled_command(0x81)  # Set contrast control
-        self.send_oled_command(0x7F)  # Contrast value
-        self.send_oled_command(0xA6)  # Set normal display
-        self.send_oled_command(0xD5)  # Set display clock divider
-        self.send_oled_command(0x80)  # Default clock divider
-        self.send_oled_command(0x8D)  # Enable charge pump
-        self.send_oled_command(0x14)  # Charge pump setting
-        self.send_oled_command(0xAF)  # Display on
-
-    def send_oled_command(self, command):
-        """Send a command to the OLED display."""
-        self.i2c_bus.write_byte_data(self.oled_address, 0x00, command)
-
-    def send_oled_data(self, data):
-        """Send data to the OLED display."""
-        self.i2c_bus.write_byte_data(self.oled_address, 0x40, data)
-
-    def check_entrance(self):
-        if GPIO.input(IR_SENSOR):
-            self.people_count += 1
-            self.bluetooth.write(b"DOOR:1\n")
-            
-    def check_exit(self):
-        GPIO.output(TRIG_PIN, GPIO.LOW)
-        time.sleep(0.000002)
-        GPIO.output(TRIG_PIN, GPIO.HIGH)
-        time.sleep(0.00001)
-        GPIO.output(TRIG_PIN, GPIO.LOW)
-        
-        while not GPIO.input(ECHO_PIN):
-            pass
-        start_time = time.time()
-        
-        while GPIO.input(ECHO_PIN):
-            pass
-        duration = time.time() - start_time
-        
-        distance = duration * 34300 / 2
-        if distance < DISTANCE_THRESHOLD and self.people_count > 0:
-            self.people_count -= 1
-            self.bluetooth.write(b"DOOR:1\n")
-            
     def check_sound(self):
         sound_value = GPIO.input(SOUND_PIN)
-        current_time = time.time()
-        
-        if sound_value > SOUND_THRESHOLD:
-            if current_time - self.last_buzzer_time > 2:
+        if sound_value == GPIO.HIGH:  # High sound detected
+            current_time = time.time()
+            if current_time - self.last_buzzer_time > 2:  # 2 second cooldown
                 GPIO.output(BUZZER_PIN, GPIO.HIGH)
                 time.sleep(2)
                 GPIO.output(BUZZER_PIN, GPIO.LOW)
                 self.last_buzzer_time = current_time
-                self.sound_level = "High"
-        elif sound_value > SOUND_THRESHOLD/2:
-            self.sound_level = "Medium"
-        else:
-            self.sound_level = "Low"
+                return "High"
+        return "Low"
+
+    def read_temperature_humidity(self):
+        humidity, temperature = Adafruit_DHT.read_retry(self.dht_sensor, DHT_PIN)
+        return temperature if temperature is not None else 0, humidity if humidity is not None else 0
+
+    def read_distance(self):
+        GPIO.output(TRIG_PIN, False)
+        time.sleep(0.000002)
+        GPIO.output(TRIG_PIN, True)
+        time.sleep(0.00001)
+        GPIO.output(TRIG_PIN, False)
+        
+        while GPIO.input(ECHO_PIN) == 0:
+            pulse_start = time.time()
+        while GPIO.input(ECHO_PIN) == 1:
+            pulse_end = time.time()
             
-    def update_display(self):
-        try:
-            humidity, temperature = Adafruit_DHT.read_retry(self.dht_sensor, self.dht_pin)
-            if humidity is not None and temperature is not None:
-                self.bluetooth.write(f"TEMP:{temperature}\n".encode())
-                
-                # Clear display
-                self.send_oled_command(0x00)  # Clear display memory
-                self.send_oled_command(0x21)  # Set column address
-                self.send_oled_command(0x00)  # Start at column 0
-                self.send_oled_command(SCREEN_WIDTH - 1)  # End at column 127
-                self.send_oled_command(0x22)  # Set page address
-                self.send_oled_command(0x00)  # Start at page 0
-                self.send_oled_command(0x07)  # End at page 7
-                
-                # Create blank image for drawing
-                image = Image.new("1", (SCREEN_WIDTH, SCREEN_HEIGHT))
-                draw = ImageDraw.Draw(image)
-                
-                # Draw text
-                draw.text((0, 0), f"People: {self.people_count}", fill=255)
-                draw.text((0, 10), f"Temp: {temperature}°C", fill=255)
-                draw.text((0, 20), f"Humidity: {humidity}%", fill=255)
-                
-                # Display image data
-                for y in range(0, SCREEN_HEIGHT, 8):
-                    line = 0
-                    for x in range(SCREEN_WIDTH):
-                        pixel = image.getpixel((x, y))
-                        if pixel == 0:
-                            line |= 0x00
-                        else:
-                            line |= (1 << (x % 8))
-                    self.send_oled_data(line)
-            else:
-                print("Failed to get reading from DHT sensor")
-                
-        except RuntimeError as e:
-            print(f"DHT Reading error: {e}")
+        pulse_duration = pulse_end - pulse_start
+        distance = pulse_duration * 17150
+        return distance
+
+    def check_people_counter(self):
+        # Check entrance (IR sensor)
+        if GPIO.input(IR_SENSOR):
+            self.people_count += 1
+            self.door_state = True
+            self.arduino.write(b"DOOR:OPEN\n")
+            time.sleep(3)
+            self.arduino.write(b"DOOR:CLOSE\n")
+            self.door_state = False
             
-    def upload_to_thingspeak(self):
-        try:
-            humidity, temperature = Adafruit_DHT.read_retry(self.dht_sensor, self.dht_pin)
-            if humidity is not None and temperature is not None:
-                light = GPIO.input(LDR_PIN)
-                smoke = GPIO.input(SMOKE_PIN)
-                
-                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                payload = {
-                    'write_api_key': WRITE_API_KEY,
-                    'updates': [{
-                        'created_at': timestamp,
-                        'field1': self.people_count,
-                        'field2': temperature,
-                        'field3': humidity,
-                        'field4': light,
-                        'field5': smoke,
-                        'field6': 1 if self.sound_level == "High" else (0.5 if self.sound_level == "Medium" else 0),
-                        'field7': 0  # Door status
-                    }]
-                }
-                
-                response = requests.post(BASE_URL, json=payload)
-                if response.status_code == 202:
-                    print(f"Data uploaded successfully at {timestamp}")
-                else:
-                    print(f"Error uploading data: {response.status_code}")
-                
-        except Exception as e:
-            print(f"Error in upload: {e}")
-            
+        # Check exit (ultrasonic sensor)
+        distance = self.read_distance()
+        if distance < DISTANCE_THRESHOLD and self.people_count > 0:
+            self.people_count -= 1
+            self.door_state = True
+            self.arduino.write(b"DOOR:OPEN\n")
+            time.sleep(3)
+            self.arduino.write(b"DOOR:CLOSE\n")
+            self.door_state = False
+
+    def read_sensors(self):
+        temperature, humidity = self.read_temperature_humidity()
+        sound_level = self.check_sound()
+        light_level = GPIO.input(LDR_PIN)
+        smoke_level = GPIO.input(SMOKE_PIN)
+        
+        return {
+            'people_count': self.people_count,
+            'temperature': temperature,
+            'humidity': humidity,
+            'light': light_level,
+            'smoke': smoke_level,
+            'sound': sound_level,
+            'door': 1 if self.door_state else 0
+        }
+
+    def send_data_to_arduino(self, sensor_data):
+        data_string = f"DATA:{sensor_data['people_count']},{sensor_data['temperature']:.1f},"
+        data_string += f"{sensor_data['humidity']:.1f},{sensor_data['light']},"
+        data_string += f"{sensor_data['smoke']},{sensor_data['sound']},{sensor_data['door']}\n"
+        
+        self.arduino.write(data_string.encode())
+
+    def cleanup(self):
+        GPIO.cleanup()
+        self.arduino.close()
+
     def run(self):
         try:
             while True:
-                self.check_entrance()
-                self.check_exit()
-                self.check_sound()
-                self.update_display()
-                self.upload_to_thingspeak()
-                time.sleep(15)  # ThingSpeak free tier limit
+                # Check people counter
+                self.check_people_counter()
+                
+                # Read all sensors
+                sensor_data = self.read_sensors()
+                
+                # Send data to Arduino
+                self.send_data_to_arduino(sensor_data)
+                
+                time.sleep(0.1)
                 
         except KeyboardInterrupt:
-            print("Cleaning up...")
-            GPIO.cleanup()
-            self.bluetooth.close()
-            
+            print("\nProgram terminated by user")
+            self.cleanup()
+        except Exception as e:
+            print(f"Error occurred: {e}")
+            self.cleanup()
+
 if __name__ == "__main__":
     system = SmartSystem()
     system.run()
