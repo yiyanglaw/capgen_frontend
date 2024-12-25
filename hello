@@ -3,6 +3,13 @@ import time
 from datetime import datetime
 import RPi.GPIO as GPIO
 import Adafruit_DHT
+import requests
+import json
+
+# ThingSpeak configuration
+WRITE_API_KEY = 'OEH1GUAT6UXH5P6N'  # Replace with your API key
+CHANNEL_ID = '2794357'  # Replace with your channel ID
+THINGSPEAK_URL = f'https://api.thingspeak.com/update'
 
 # Pin definitions
 BUZZER_PIN = 18
@@ -17,8 +24,9 @@ SMOKE_PIN = 22
 # Constants
 SOUND_THRESHOLD = 500
 DISTANCE_THRESHOLD = 100
-SERIAL_PORT = '/dev/ttyACM0'  # USB connection to Arduino
+SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
+THINGSPEAK_INTERVAL = 15  # Minimum 15 seconds for free account
 
 class SmartSystem:
     def __init__(self):
@@ -35,21 +43,23 @@ class SmartSystem:
         # Initialize serial connection to Arduino
         try:
             self.arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-            time.sleep(2)  # Wait for connection to establish
+            time.sleep(2)
+            print(f"Successfully connected to Arduino on {SERIAL_PORT}")
         except serial.SerialException as e:
             print(f"Error opening serial connection: {e}")
             exit(1)
             
         self.last_buzzer_time = 0
+        self.last_thingspeak_update = 0
         self.dht_sensor = Adafruit_DHT.DHT11
         self.people_count = 0
         self.door_state = False
-        
+
     def check_sound(self):
         sound_value = GPIO.input(SOUND_PIN)
-        if sound_value == GPIO.HIGH:  # High sound detected
+        if sound_value == GPIO.HIGH:
             current_time = time.time()
-            if current_time - self.last_buzzer_time > 2:  # 2 second cooldown
+            if current_time - self.last_buzzer_time > 2:
                 GPIO.output(BUZZER_PIN, GPIO.HIGH)
                 time.sleep(2)
                 GPIO.output(BUZZER_PIN, GPIO.LOW)
@@ -78,7 +88,6 @@ class SmartSystem:
         return distance
 
     def check_people_counter(self):
-        # Check entrance (IR sensor)
         if GPIO.input(IR_SENSOR):
             self.people_count += 1
             self.door_state = True
@@ -87,7 +96,6 @@ class SmartSystem:
             self.arduino.write(b"DOOR:CLOSE\n")
             self.door_state = False
             
-        # Check exit (ultrasonic sensor)
         distance = self.read_distance()
         if distance < DISTANCE_THRESHOLD and self.people_count > 0:
             self.people_count -= 1
@@ -120,12 +128,40 @@ class SmartSystem:
         
         self.arduino.write(data_string.encode())
 
+    def upload_to_thingspeak(self, sensor_data):
+        # Convert sound level to numeric value for ThingSpeak
+        sound_value = 1 if sensor_data['sound'] == "High" else 0
+
+        # Prepare data for ThingSpeak
+        payload = {
+            'api_key': WRITE_API_KEY,
+            'field1': sensor_data['people_count'],
+            'field2': sensor_data['temperature'],
+            'field3': sensor_data['humidity'],
+            'field4': sensor_data['light'],
+            'field5': sensor_data['smoke'],
+            'field6': sound_value,
+            'field7': sensor_data['door']
+        }
+
+        try:
+            response = requests.post(THINGSPEAK_URL, data=payload)
+            if response.status_code == 200:
+                print(f"Data uploaded to ThingSpeak successfully at {datetime.now()}")
+            else:
+                print(f"Failed to upload to ThingSpeak. Status code: {response.status_code}")
+        except Exception as e:
+            print(f"Error uploading to ThingSpeak: {e}")
+
     def cleanup(self):
         GPIO.cleanup()
         self.arduino.close()
 
     def run(self):
         try:
+            print("System started. Press Ctrl+C to exit.")
+            print("Monitoring sensors and uploading to ThingSpeak...")
+            
             while True:
                 # Check people counter
                 self.check_people_counter()
@@ -136,13 +172,19 @@ class SmartSystem:
                 # Send data to Arduino
                 self.send_data_to_arduino(sensor_data)
                 
+                # Upload to ThingSpeak every THINGSPEAK_INTERVAL seconds
+                current_time = time.time()
+                if current_time - self.last_thingspeak_update >= THINGSPEAK_INTERVAL:
+                    self.upload_to_thingspeak(sensor_data)
+                    self.last_thingspeak_update = current_time
+                
                 time.sleep(0.1)
                 
         except KeyboardInterrupt:
             print("\nProgram terminated by user")
             self.cleanup()
         except Exception as e:
-            print(f"Error occurred: {e}")
+            print(f"\nError occurred: {e}")
             self.cleanup()
 
 if __name__ == "__main__":
