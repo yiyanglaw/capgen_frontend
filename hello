@@ -2,27 +2,20 @@ import serial
 import time
 from datetime import datetime
 import RPi.GPIO as GPIO
-import Adafruit_DHT
 import requests
 import json
-import platform
 
-# ThingSpeak configuration
 WRITE_API_KEY = 'OEH1GUAT6UXH5P6N'
 CHANNEL_ID = '2794357'
-THINGSPEAK_URL = f'https://api.thingspeak.com/update'
+THINGSPEAK_URL = 'https://api.thingspeak.com/update'
 
-# Pin definitions
-BUZZER_PIN = 18
 SOUND_PIN = 17
-DHT_PIN = 4
 IR_SENSOR = 23
 ECHO_PIN = 24
 TRIG_PIN = 25
 LDR_PIN = 27
 SMOKE_PIN = 22
 
-# Constants
 SOUND_THRESHOLD = 500
 DISTANCE_THRESHOLD = 100
 SERIAL_PORT = '/dev/ttyUSB0'
@@ -31,65 +24,20 @@ THINGSPEAK_INTERVAL = 15
 
 class SmartSystem:
     def __init__(self):
-        print("Initializing Smart System...")
-        print(f"Running on: {platform.platform()}")
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(SOUND_PIN, GPIO.IN)
+        GPIO.setup(IR_SENSOR, GPIO.IN)
+        GPIO.setup(TRIG_PIN, GPIO.OUT)
+        GPIO.setup(ECHO_PIN, GPIO.IN)
+        GPIO.setup(LDR_PIN, GPIO.IN)
+        GPIO.setup(SMOKE_PIN, GPIO.IN)
         
-        try:
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(BUZZER_PIN, GPIO.OUT)
-            GPIO.setup(SOUND_PIN, GPIO.IN)
-            GPIO.setup(IR_SENSOR, GPIO.IN)
-            GPIO.setup(TRIG_PIN, GPIO.OUT)
-            GPIO.setup(ECHO_PIN, GPIO.IN)
-            GPIO.setup(LDR_PIN, GPIO.IN)
-            GPIO.setup(SMOKE_PIN, GPIO.IN)
-            print("GPIO setup completed successfully")
-        except Exception as e:
-            print(f"Error setting up GPIO: {e}")
-            raise
+        self.arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+        time.sleep(2)
         
-        try:
-            self.arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-            time.sleep(2)
-            print(f"Successfully connected to Arduino on {SERIAL_PORT}")
-        except serial.SerialException as e:
-            print(f"Error opening serial connection: {e}")
-            GPIO.cleanup()
-            raise
-            
-        try:
-            self.dht_sensor = Adafruit_DHT.DHT11
-            humidity, temperature = Adafruit_DHT.read_retry(self.dht_sensor, DHT_PIN)
-            if humidity is not None and temperature is not None:
-                print("DHT11 sensor initialized successfully")
-            else:
-                print("Warning: Unable to get initial reading from DHT sensor")
-        except Exception as e:
-            print(f"Warning: Error initializing DHT sensor: {e}")
-            print("System will continue with default temperature/humidity values")
-            
-        self.last_buzzer_time = 0
         self.last_thingspeak_update = 0
         self.people_count = 0
         self.door_state = False
-        self.last_valid_temperature = 0
-        self.last_valid_humidity = 0
-
-    def read_temperature_humidity(self):
-        try:
-            humidity, temperature = Adafruit_DHT.read_retry(self.dht_sensor, DHT_PIN, retries=3)
-            
-            if humidity is not None and temperature is not None:
-                self.last_valid_temperature = temperature
-                self.last_valid_humidity = humidity
-                return temperature, humidity
-            else:
-                print("Warning: Failed to read from DHT sensor, using last valid readings")
-                return self.last_valid_temperature, self.last_valid_humidity
-                
-        except Exception as e:
-            print(f"Error reading DHT sensor: {e}")
-            return self.last_valid_temperature, self.last_valid_humidity
 
     def check_people_counter(self):
         ir_status = GPIO.input(IR_SENSOR)
@@ -98,17 +46,12 @@ class SmartSystem:
         time.sleep(0.00001)
         GPIO.output(TRIG_PIN, False)
         
-        pulse_start = time.time()
-        pulse_end = time.time()
-        
         while GPIO.input(ECHO_PIN) == 0:
             pulse_start = time.time()
-            
         while GPIO.input(ECHO_PIN) == 1:
             pulse_end = time.time()
         
-        pulse_duration = pulse_end - pulse_start
-        distance = pulse_duration * 17150
+        distance = (pulse_end - pulse_start) * 17150
         
         if distance < DISTANCE_THRESHOLD:
             if not self.door_state:
@@ -120,33 +63,30 @@ class SmartSystem:
         else:
             self.door_state = False
 
-    def read_sensors(self):
-        temperature, humidity = self.read_temperature_humidity()
-        
-        # Read other sensors
+    def get_sensor_data(self):
         sound_level = "High" if GPIO.input(SOUND_PIN) == 1 else "Low"
         light_level = "High" if GPIO.input(LDR_PIN) == 1 else "Low"
         smoke_detected = GPIO.input(SMOKE_PIN) == 1
         
-        return {
-            'temperature': temperature,
-            'humidity': humidity,
-            'sound': sound_level,
-            'light': light_level,
-            'smoke': smoke_detected,
-            'people_count': self.people_count,
-            'door': self.door_state
-        }
-
-    def send_data_to_arduino(self, sensor_data):
         try:
-            data = json.dumps(sensor_data)
-            self.arduino.write(data.encode())
+            if self.arduino.in_waiting:
+                data = json.loads(self.arduino.readline().decode().strip())
+                return {
+                    'temperature': data['temperature'],
+                    'humidity': data['humidity'],
+                    'sound': sound_level,
+                    'light': light_level,
+                    'smoke': smoke_detected,
+                    'people_count': self.people_count,
+                    'door': self.door_state
+                }
         except Exception as e:
-            print(f"Error sending data to Arduino: {e}")
+            print(f"Error reading Arduino data: {e}")
+        return None
 
     def upload_to_thingspeak(self, sensor_data):
-        sound_value = 1 if sensor_data['sound'] == "High" else 0
+        if not sensor_data:
+            return
 
         payload = {
             'api_key': WRITE_API_KEY,
@@ -155,73 +95,38 @@ class SmartSystem:
             'field3': sensor_data['humidity'],
             'field4': sensor_data['light'],
             'field5': sensor_data['smoke'],
-            'field6': sound_value,
+            'field6': 1 if sensor_data['sound'] == "High" else 0,
             'field7': sensor_data['door']
         }
 
         try:
             response = requests.post(THINGSPEAK_URL, data=payload)
             if response.status_code == 200:
-                print(f"Data uploaded to ThingSpeak successfully at {datetime.now()}")
-                print(f"Values - Temp: {sensor_data['temperature']}°C, "
-                      f"Humidity: {sensor_data['humidity']}%, "
-                      f"People: {sensor_data['people_count']}, "
-                      f"Sound: {sensor_data['sound']}")
-            else:
-                print(f"Failed to upload to ThingSpeak. Status code: {response.status_code}")
+                print(f"Data uploaded successfully at {datetime.now()}")
         except Exception as e:
             print(f"Error uploading to ThingSpeak: {e}")
 
-    def cleanup(self):
-        print("\nCleaning up...")
-        try:
-            self.arduino.close()
-        except:
-            pass
-        GPIO.cleanup()
-        print("Cleanup completed")
-
     def run(self):
         try:
-            print("\nSystem started. Press Ctrl+C to exit.")
-            print("Monitoring sensors and uploading to ThingSpeak...")
-            
             while True:
-                try:
-                    self.check_people_counter()
-                    sensor_data = self.read_sensors()
-                    self.send_data_to_arduino(sensor_data)
-                    
-                    current_time = time.time()
-                    if current_time - self.last_thingspeak_update >= THINGSPEAK_INTERVAL:
-                        self.upload_to_thingspeak(sensor_data)
-                        self.last_thingspeak_update = current_time
-                    
-                    time.sleep(0.1)
-                    
-                except Exception as e:
-                    print(f"Error in main loop: {e}")
-                    print("Attempting to continue...")
-                    time.sleep(1)
+                self.check_people_counter()
+                sensor_data = self.get_sensor_data()
+                
+                current_time = time.time()
+                if sensor_data and current_time - self.last_thingspeak_update >= THINGSPEAK_INTERVAL:
+                    self.upload_to_thingspeak(sensor_data)
+                    self.last_thingspeak_update = current_time
+                
+                time.sleep(0.1)
                 
         except KeyboardInterrupt:
-            print("\nProgram terminated by user")
-            self.cleanup()
-        except Exception as e:
-            print(f"\nCritical error occurred: {e}")
-            self.cleanup()
-            raise
+            self.arduino.close()
+            GPIO.cleanup()
 
 if __name__ == "__main__":
     try:
         system = SmartSystem()
         system.run()
     except Exception as e:
-        print(f"Failed to start system: {e}")
-        print("\nTroubleshooting steps:")
-        print("1. Check if all required libraries are installed:")
-        print("   pip install Adafruit_DHT RPi.GPIO pyserial requests")
-        print("2. Check if running with sudo if needed:")
-        print("   sudo python your_script.py")
-        print("3. Verify all sensor connections")
-        print("4. Check GPIO permissions")
+        print(f"Error: {e}")
+        GPIO.cleanup()
