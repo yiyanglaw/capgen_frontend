@@ -1,156 +1,90 @@
 import serial
 import time
 from datetime import datetime
-import RPi.GPIO as GPIO
 import requests
+import json
 
+# ThingSpeak configuration
 WRITE_API_KEY = 'OEH1GUAT6UXH5P6N'
+CHANNEL_ID = '2794357'
 THINGSPEAK_URL = 'https://api.thingspeak.com/update'
 
-# Analog inputs
-SOUND_PIN = 17  # A0
-LDR_PIN = 27    # A1
-SMOKE_PIN = 22  # A2
-
-# Digital inputs for people counter
-IR_SENSOR = 23
-ECHO_PIN = 24
-TRIG_PIN = 25
-
-DISTANCE_THRESHOLD = 100
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
 THINGSPEAK_INTERVAL = 15
 
 class SmartSystem:
     def __init__(self):
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(SOUND_PIN, GPIO.IN)
-        GPIO.setup(LDR_PIN, GPIO.IN)
-        GPIO.setup(SMOKE_PIN, GPIO.IN)
-        GPIO.setup(IR_SENSOR, GPIO.IN)
-        GPIO.setup(TRIG_PIN, GPIO.OUT)
-        GPIO.setup(ECHO_PIN, GPIO.IN)
-        
         self.arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
         time.sleep(2)
-        
         self.last_thingspeak_update = 0
-        self.people_count = 0
-        self.door_state = False
-        self.temperature = 0
-        self.humidity = 0
 
-    def check_people_counter(self):
-        ir_status = GPIO.input(IR_SENSOR)
-        
-        GPIO.output(TRIG_PIN, True)
-        time.sleep(0.00001)
-        GPIO.output(TRIG_PIN, False)
-        
-        pulse_start = time.time()
-        pulse_end = time.time()
-        
-        while GPIO.input(ECHO_PIN) == 0:
-            pulse_start = time.time()
-        while GPIO.input(ECHO_PIN) == 1:
-            pulse_end = time.time()
-        
-        distance = (pulse_end - pulse_start) * 17150
-        
-        if distance < DISTANCE_THRESHOLD:
-            if not self.door_state:
-                if ir_status == 1:
-                    self.people_count += 1
-                else:
-                    self.people_count = max(0, self.people_count - 1)
-                self.door_state = True
-                self.arduino.write(f"DOOR:1\n".encode())
-        else:
-            if self.door_state:
-                self.door_state = False
-                self.arduino.write(f"DOOR:0\n".encode())
-        
-        self.arduino.write(f"COUNT:{self.people_count}\n".encode())
-
-    def read_arduino_data(self):
-        if self.arduino.in_waiting:
-            try:
-                data = self.arduino.readline().decode().strip()
-                if data.startswith("DATA:"):
-                    values = data[5:].split(',')
-                    if len(values) == 2:
-                        self.temperature = float(values[0])
-                        self.humidity = float(values[1])
-            except Exception as e:
-                print(f"Error reading Arduino data: {e}")
-
-    def read_sensors(self):
-        sound_level = GPIO.input(SOUND_PIN)  # Read analog value
-        light_level = GPIO.input(LDR_PIN)    # Read analog value
-        smoke_level = GPIO.input(SMOKE_PIN)  # Read analog value
-        
-        return {
-            'temperature': self.temperature,
-            'humidity': self.humidity,
-            'sound': "High" if sound_level == 1 else "Low",
-            'light': "High" if light_level == 1 else "Low",
-            'smoke': smoke_level == 1,
-            'people_count': self.people_count,
-            'door': self.door_state
-        }
+    def get_sensor_data(self):
+        try:
+            if self.arduino.in_waiting:
+                data = self.arduino.readline().decode().strip().split(',')
+                if len(data) == 7:
+                    return {
+                        'temperature': float(data[0]),
+                        'humidity': float(data[1]),
+                        'people_count': int(data[2]),
+                        'light': bool(int(data[3])),
+                        'smoke': bool(int(data[4])),
+                        'sound': bool(int(data[5])),
+                        'door': bool(int(data[6]))
+                    }
+        except Exception as e:
+            print(f"Error reading Arduino data: {e}")
+        return None
 
     def upload_to_thingspeak(self, sensor_data):
+        if not sensor_data:
+            return
+
         payload = {
             'api_key': WRITE_API_KEY,
             'field1': sensor_data['people_count'],
             'field2': sensor_data['temperature'],
             'field3': sensor_data['humidity'],
-            'field4': 1 if sensor_data['light'] == "High" else 0,
-            'field5': 1 if sensor_data['smoke'] else 0,
-            'field6': 1 if sensor_data['sound'] == "High" else 0,
-            'field7': 1 if sensor_data['door'] else 0
+            'field4': int(sensor_data['light']),
+            'field5': int(sensor_data['smoke']),
+            'field6': int(sensor_data['sound']),
+            'field7': int(sensor_data['door'])
         }
 
         try:
             response = requests.post(THINGSPEAK_URL, data=payload)
             if response.status_code == 200:
                 print(f"Data uploaded at {datetime.now()}")
-                print(f"Temperature: {sensor_data['temperature']}°C")
-                print(f"Humidity: {sensor_data['humidity']}%")
-                print(f"People Count: {sensor_data['people_count']}")
+                print(f"Temp: {sensor_data['temperature']}°C, "
+                      f"Humidity: {sensor_data['humidity']}%, "
+                      f"People: {sensor_data['people_count']}")
         except Exception as e:
             print(f"ThingSpeak upload error: {e}")
 
     def run(self):
         try:
-            print("System running. Press Ctrl+C to exit.")
-            
+            print("System started. Press Ctrl+C to exit.")
             while True:
-                self.check_people_counter()
-                self.read_arduino_data()
-                sensor_data = self.read_sensors()
+                sensor_data = self.get_sensor_data()
                 
                 current_time = time.time()
-                if current_time - self.last_thingspeak_update >= THINGSPEAK_INTERVAL:
+                if sensor_data and current_time - self.last_thingspeak_update >= THINGSPEAK_INTERVAL:
                     self.upload_to_thingspeak(sensor_data)
                     self.last_thingspeak_update = current_time
                 
                 time.sleep(0.1)
                 
         except KeyboardInterrupt:
-            print("\nShutting down...")
+            print("\nProgram terminated")
             self.arduino.close()
-            GPIO.cleanup()
         except Exception as e:
             print(f"Error: {e}")
             self.arduino.close()
-            GPIO.cleanup()
 
 if __name__ == "__main__":
     try:
         system = SmartSystem()
         system.run()
     except Exception as e:
-        print(f"Startup error: {e}")
-        GPIO.cleanup()
+        print(f"Failed to start: {e}")
