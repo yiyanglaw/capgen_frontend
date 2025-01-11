@@ -17,7 +17,7 @@ MQTT_TOPIC_PUBLISH = "robot/sensor_data"
 MQTT_TOPIC_SUBSCRIBE = "robot/commands"
 
 # Serial Configuration
-SERIAL_PORT = "/dev/ttyUSB2"
+SERIAL_PORT = "/dev/video0"  # Update to match your serial port
 SERIAL_BAUD = 115200
 
 # ThingSpeak Configuration
@@ -41,7 +41,7 @@ class RobotBridge:
         self.client.loop_start()
 
         # Initialize video capture
-        self.cap = cv2.VideoCapture(2)  # USB camera on port 2
+        self.cap = cv2.VideoCapture(0)  # USB camera on port 0
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
@@ -86,14 +86,14 @@ class RobotBridge:
                     # Convert frame to JPEG
                     _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
                     jpg_as_text = base64.b64encode(buffer).decode()
-                    
+
                     # Upload to ThingSpeak
                     payload = {
                         'api_key': THINGSPEAK_API_KEY,
                         f'field{THINGSPEAK_VIDEO_FIELD}': jpg_as_text
                     }
                     requests.post('https://api.thingspeak.com/update', data=payload)
-                    
+
                 time.sleep(THINGSPEAK_UPDATE_INTERVAL)
             except Exception as e:
                 print(f"Error in video streaming: {e}")
@@ -111,11 +111,12 @@ class RobotBridge:
                             self.client.publish(MQTT_TOPIC_PUBLISH, sensor_json)
 
                 time.sleep(0.01)
-except Exception as e:
+            except Exception as e:  # Catch exceptions in the main loop
                 print(f"Error in main loop: {e}")
                 time.sleep(1)
 
     def cleanup(self):
+        print("Cleaning up resources...")
         self.client.loop_stop()
         self.client.disconnect()
         self.serial.close()
