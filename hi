@@ -6,6 +6,7 @@ from datetime import datetime
 import cv2
 import requests
 import threading
+import base64
 
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
@@ -16,7 +17,7 @@ SERIAL_PORT = "/dev/video0"
 SERIAL_BAUD = 115200
 
 THINGSPEAK_API_KEY = "T28CU7RMT7LFSDOY"
-THINGSPEAK_VIDEO_CHANNEL = "2807000"
+THINGSPEAK_CHANNEL_ID = "2807000"
 THINGSPEAK_UPDATE_INTERVAL = 0.1
 
 class RobotBridge:
@@ -72,14 +73,25 @@ class RobotBridge:
             try:
                 ret, frame = self.cap.read()
                 if ret:
-                    _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    # Compress and convert frame to JPEG
+                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                    # Convert to base64
+                    jpg_as_text = base64.b64encode(buffer).decode()
+                    
+                    # Update ThingSpeak
+                    payload = {
+                        'api_key': THINGSPEAK_API_KEY,
+                        'field1': jpg_as_text
+                    }
+                    
                     response = requests.post(
-                        f'https://video.thingspeak.com/update/video/{THINGSPEAK_VIDEO_CHANNEL}',
-                        headers={'X-THINGSPEAKAPIKEY': THINGSPEAK_API_KEY},
-                        files={'file': ('frame.jpg', jpeg.tobytes(), 'image/jpeg')}
+                        f'https://api.thingspeak.com/update',
+                        data=payload
                     )
+                    
                     if response.status_code != 200:
                         print(f"Failed to upload video frame: {response.status_code}")
+                        
                 time.sleep(THINGSPEAK_UPDATE_INTERVAL)
             except Exception as e:
                 print(f"Error in video streaming: {e}")
