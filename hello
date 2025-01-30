@@ -2,42 +2,81 @@ import serial
 import time
 from datetime import datetime
 import requests
-import json
 
-# ThingSpeak configuration
+# ThingSpeak Configuration
 WRITE_API_KEY = 'OEH1GUAT6UXH5P6N'
 CHANNEL_ID = '2794357'
 THINGSPEAK_URL = 'https://api.thingspeak.com/update'
 
-SERIAL_PORT = '/dev/ttyUSB0'
+# Serial Configuration (Modify if using a different port)
+SERIAL_PORT = '/dev/ttyUSB1'
 BAUD_RATE = 9600
-THINGSPEAK_INTERVAL = 15
+THINGSPEAK_INTERVAL = 5  # Upload interval in seconds
+
+# Fan Control Thresholds
+TEMP_THRESHOLD = 30  # Temperature (°C) to turn on fan
+SMOKE_THRESHOLD = 400  # Smoke sensor raw value to turn on fan
 
 class SmartSystem:
     def __init__(self):
-        self.arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-        time.sleep(2)
+        self.arduino = None
+        self.connect_arduino()
         self.last_thingspeak_update = 0
+        self.fan_status = 0  # 0 = OFF, 1 = ON
+
+    def connect_arduino(self):
+        """ Attempt to connect to Arduino and handle reconnections. """
+        try:
+            self.arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+            time.sleep(2)
+            print("✅ Connected to Arduino")
+        except Exception as e:
+            print(f"❌ Error connecting to Arduino: {e}")
+            self.arduino = None
 
     def get_sensor_data(self):
+        """ Read and parse data from Arduino """
+        if not self.arduino:
+            self.connect_arduino()
+            return None
+
         try:
             if self.arduino.in_waiting:
                 data = self.arduino.readline().decode().strip().split(',')
                 if len(data) == 7:
-                    return {
+                    sensor_data = {
                         'temperature': float(data[0]),
                         'humidity': float(data[1]),
                         'people_count': int(data[2]),
-                        'light': bool(int(data[3])),
-                        'smoke': bool(int(data[4])),
-                        'sound': bool(int(data[5])),
+                        'light': int(data[3]),      # Raw analog value
+                        'smoke': int(data[4]),      # Raw analog value
+                        'sound': int(data[5]),      # Raw analog value
                         'door': bool(int(data[6]))
                     }
+                    
+                    # Update fan status based on temperature and smoke
+                    self.update_fan_status(sensor_data)
+                    
+                    return sensor_data
         except Exception as e:
-            print(f"Error reading Arduino data: {e}")
-        return None
+            print(f"❌ Error reading Arduino data: {e}")
+            return None
+
+    def update_fan_status(self, sensor_data):
+        """ Control fan based on temperature and smoke level """
+        if sensor_data['temperature'] > TEMP_THRESHOLD or sensor_data['smoke'] > SMOKE_THRESHOLD:
+            self.fan_status = 1  # Turn on fan
+        else:
+            self.fan_status = 0  # Turn off fan
+
+        try:
+            if self.arduino:
+                self.arduino.write(f"{self.fan_status}\n".encode())  # Send fan status to Arduino
+        except Exception as e:
+            print(f"❌ Error sending fan status to Arduino: {e}")
 
     def upload_to_thingspeak(self, sensor_data):
+        """ Upload sensor data and fan status to ThingSpeak """
         if not sensor_data:
             return
 
@@ -46,25 +85,28 @@ class SmartSystem:
             'field1': sensor_data['people_count'],
             'field2': sensor_data['temperature'],
             'field3': sensor_data['humidity'],
-            'field4': int(sensor_data['light']),
-            'field5': int(sensor_data['smoke']),
-            'field6': int(sensor_data['sound']),
-            'field7': int(sensor_data['door'])
+            'field4': sensor_data['light'],     # Send raw analog value
+            'field5': sensor_data['smoke'],     # Send raw analog value
+            'field6': sensor_data['sound'],     # Send raw analog value
+            'field7': int(sensor_data['door']),
+            'field8': self.fan_status           # New Fan Status field
         }
 
         try:
             response = requests.post(THINGSPEAK_URL, data=payload)
             if response.status_code == 200:
-                print(f"Data uploaded at {datetime.now()}")
-                print(f"Temp: {sensor_data['temperature']}°C, "
-                      f"Humidity: {sensor_data['humidity']}%, "
-                      f"People: {sensor_data['people_count']}")
+                print(f"✅ Data uploaded at {datetime.now()}")
+                print(f"🌡 Temp: {sensor_data['temperature']}°C, 💧 Humidity: {sensor_data['humidity']}%")
+                print(f"👥 People: {sensor_data['people_count']}, 💡 Light: {sensor_data['light']}")
+                print(f"🔥 Smoke: {sensor_data['smoke']}, 🔊 Sound: {sensor_data['sound']}")
+                print(f"🚪 Door: {'Open' if sensor_data['door'] else 'Closed'}, 🌬 Fan: {'ON' if self.fan_status else 'OFF'}")
         except Exception as e:
-            print(f"ThingSpeak upload error: {e}")
+            print(f"❌ ThingSpeak upload error: {e}")
 
     def run(self):
+        """ Main loop for reading data and updating ThingSpeak """
         try:
-            print("System started. Press Ctrl+C to exit.")
+            print("🚀 System started. Press Ctrl+C to exit.")
             while True:
                 sensor_data = self.get_sensor_data()
                 
@@ -76,15 +118,17 @@ class SmartSystem:
                 time.sleep(0.1)
                 
         except KeyboardInterrupt:
-            print("\nProgram terminated")
-            self.arduino.close()
+            print("\n❌ Program terminated")
+            if self.arduino:
+                self.arduino.close()
         except Exception as e:
-            print(f"Error: {e}")
-            self.arduino.close()
+            print(f"❌ Error: {e}")
+            if self.arduino:
+                self.arduino.close()
 
 if __name__ == "__main__":
     try:
         system = SmartSystem()
         system.run()
     except Exception as e:
-        print(f"Failed to start: {e}")
+        print(f"❌ Failed to start: {e}")
