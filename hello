@@ -1,5 +1,8 @@
 import serial
 import time
+import cv2
+import paho.mqtt.client as mqtt
+import base64
 from datetime import datetime
 import requests
 
@@ -13,6 +16,11 @@ SERIAL_PORT = '/dev/ttyUSB1'
 BAUD_RATE = 9600
 THINGSPEAK_INTERVAL = 5  # Upload interval in seconds
 
+# MQTT Configuration for Video Streaming
+MQTT_BROKER = "broker.hivemq.com"
+MQTT_PORT = 1883
+MQTT_TOPIC = "raspberrypi/video_stream"
+
 # Fan Control Thresholds
 TEMP_THRESHOLD = 30  # Temperature (°C) to turn on fan
 SMOKE_THRESHOLD = 400  # Smoke sensor raw value to turn on fan
@@ -23,6 +31,8 @@ class SmartSystem:
         self.connect_arduino()
         self.last_thingspeak_update = 0
         self.fan_status = 0  # 0 = OFF, 1 = ON
+        self.mqtt_client = self.setup_mqtt()
+        self.cap = cv2.VideoCapture(0)  # USB Camera
 
     def connect_arduino(self):
         """ Attempt to connect to Arduino and handle reconnections. """
@@ -33,6 +43,16 @@ class SmartSystem:
         except Exception as e:
             print(f"❌ Error connecting to Arduino: {e}")
             self.arduino = None
+
+    def setup_mqtt(self):
+        """ Set up MQTT client for video streaming. """
+        client = mqtt.Client()
+        try:
+            client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            print("✅ Connected to MQTT Broker")
+        except Exception as e:
+            print(f"❌ MQTT connection error: {e}")
+        return client
 
     def get_sensor_data(self):
         """ Read and parse data from Arduino """
@@ -103,10 +123,39 @@ class SmartSystem:
         except Exception as e:
             print(f"❌ ThingSpeak upload error: {e}")
 
+    def stream_video(self):
+        """ Capture video frames from USB camera and publish to MQTT broker """
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                print("❌ Error capturing video")
+                continue
+
+            # Encode frame as JPEG
+            _, buffer = cv2.imencode('.jpg', frame)
+            jpg_as_text = base64.b64encode(buffer).decode("utf-8")
+
+            try:
+                self.mqtt_client.publish(MQTT_TOPIC, jpg_as_text)
+                print("📡 Video frame published to MQTT")
+            except Exception as e:
+                print(f"❌ MQTT publish error: {e}")
+
+            # Show video locally (optional)
+            cv2.imshow('Video Stream', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
     def run(self):
-        """ Main loop for reading data and updating ThingSpeak """
+        """ Main loop for reading data, updating ThingSpeak, and streaming video """
         try:
             print("🚀 System started. Press Ctrl+C to exit.")
+            
+            # Start video streaming in a separate thread
+            import threading
+            video_thread = threading.Thread(target=self.stream_video, daemon=True)
+            video_thread.start()
+
             while True:
                 sensor_data = self.get_sensor_data()
                 
@@ -121,10 +170,14 @@ class SmartSystem:
             print("\n❌ Program terminated")
             if self.arduino:
                 self.arduino.close()
+            self.cap.release()
+            cv2.destroyAllWindows()
         except Exception as e:
             print(f"❌ Error: {e}")
             if self.arduino:
                 self.arduino.close()
+            self.cap.release()
+            cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     try:
